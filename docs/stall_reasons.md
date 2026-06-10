@@ -117,7 +117,7 @@ Quick-reference for NCU warp stall types, root causes, and mitigations.
 - Replace `__threadfence()` with `__threadfence_block()` if cross-block ordering not needed
 - Use non-blocking fence variants (acquire/release semantics)
 - Move fence out of inner loops
-- Eliminate branches so compiler can use lighter fence variants (AVO branchless rescaling technique)
+- Eliminate branches so compiler can use lighter fence variants (branchless rescaling — see `compute_optimization.md`)
 
 ---
 

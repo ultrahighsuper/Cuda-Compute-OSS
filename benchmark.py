@@ -142,12 +142,16 @@ class _Timeout:
             self._timer.start()
         return self
 
-    def __exit__(self, *exc):
+    def __exit__(self, exc_type, exc, tb):
         if self._use_signal:
             signal.alarm(0)
             signal.signal(signal.SIGALRM, self._old)
-        else:
-            self._timer.cancel()
+            return False
+        self._timer.cancel()
+        if self._timed_out and exc_type is KeyboardInterrupt:
+            # interrupt_main() surfaces as KeyboardInterrupt in the main thread; convert it so
+            # callers catching BenchTimeoutError see a stage timeout instead of a full abort.
+            raise BenchTimeoutError(f"Timed out after {self.seconds}s") from None
         return False
 
     def _timeout_thread(self):
@@ -860,7 +864,9 @@ def run_scored_sample(kernel_fn: Callable, config: dict, seed: int = 42,
         can't win via warm-L2 residency or memoize-by-pointer;
       * CORRECTNESS is re-verified on the scored size on 2 distinct buffers (a kernel that memoizes
         buffer-0's answer fails on buffer-1) -> closes "fast garbage at the scored size";
-      * the output must not alias an input (anti-elision guard).
+      * the output must not alias an input (anti-elision guard);
+      * the validation calls run under the runtime no-delegation trap (cco/dispatch_trap.py) — a
+        kernel that delegates at runtime is disqualified (delegation != None) and never timed.
     The latencies are n_blocks block-means (mean over `rep` rotated calls), each a fresh timed
     window so the sample captures run-to-run / thermal variation for the nonparametric test.
     """
@@ -885,11 +891,20 @@ def run_scored_sample(kernel_fn: Callable, config: dict, seed: int = 42,
     # rotating buffer pool: distinct seeds -> distinct values & storage addresses
     buffers = [gen_fn(size, dtype, device, seed=seed + i) for i in range(n_buffers)]
 
-    # fused correctness on the scored size, on up to 2 distinct buffers, + anti-alias guard
-    correct, worst_err, aliased = True, 0.0, False
+    # fused correctness on the scored size, on up to 2 distinct buffers, + anti-alias guard.
+    # The validation calls run under the runtime no-delegation trap (cco/dispatch_trap.py) —
+    # the trap's per-op interception overhead is why it wraps these and NOT the timed reps.
+    from cco.dispatch_trap import DelegationError, run_guarded
+
+    correct, worst_err, aliased, delegation = True, 0.0, False, None
     for i in range(min(2, n_buffers)):
         inp = buffers[i]
-        out = kernel_fn(**inp)
+        try:
+            out = run_guarded(kernel_fn, inp)
+        except DelegationError as e:
+            delegation = str(e)
+            correct = False
+            break
         cmp = _do_compare(out, ref_fn(inp), tols["atol"], tols["rtol"], multi)
         correct = correct and bool(cmp["match"])
         worst_err = max(worst_err, cmp.get("max_abs_error", 0.0))
@@ -900,21 +915,23 @@ def run_scored_sample(kernel_fn: Callable, config: dict, seed: int = 42,
             aliased = bool(_tensor_storage_ptrs(out) & in_ptrs)
     correct = correct and not aliased
 
-    # timing: n_blocks block-means, rotating buffers, fp32 CUDA events
-    for _ in range(warmup):
-        kernel_fn(**buffers[0])
-    torch.cuda.synchronize()
-
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
+    # timing: n_blocks block-means, rotating buffers, fp32 CUDA events.
+    # A kernel caught delegating is disqualified — don't execute it further; emit an empty sample.
     latencies_us = []
-    for _blk in range(n_blocks):
-        start.record()
-        for r in range(rep):
-            kernel_fn(**buffers[r % n_buffers])
-        end.record()
+    if delegation is None:
+        for _ in range(warmup):
+            kernel_fn(**buffers[0])
         torch.cuda.synchronize()
-        latencies_us.append(start.elapsed_time(end) * 1000.0 / rep)  # ms total -> per-call us
+
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        for _blk in range(n_blocks):
+            start.record()
+            for r in range(rep):
+                kernel_fn(**buffers[r % n_buffers])
+            end.record()
+            torch.cuda.synchronize()
+            latencies_us.append(start.elapsed_time(end) * 1000.0 / rep)  # ms total -> per-call us
 
     return {
         "size_label": size_label,
@@ -922,6 +939,7 @@ def run_scored_sample(kernel_fn: Callable, config: dict, seed: int = 42,
         "correct": bool(correct),
         "max_abs_error": worst_err,
         "output_aliased_input": bool(aliased),
+        "delegation": delegation,
         "n_blocks": n_blocks, "rep": rep, "warmup": warmup, "n_buffers": n_buffers,
         "latencies_us": latencies_us,
         "median_us": statistics.median(latencies_us) if latencies_us else 0.0,
@@ -1198,6 +1216,7 @@ def main():
             print(f"score_size: {sc['size_label']}")
             print(f"score_dtype: {sc['dtype']}")
             print(f"score_correct: {sc['correct']}")
+            print(f"score_delegation: {sc.get('delegation')}")
             print(f"score_output_aliased_input: {sc['output_aliased_input']}")
             print(f"score_max_abs_error: {sc['max_abs_error']:.6e}")
             print(f"score_median_us: {sc['median_us']:.4f}")
@@ -1252,6 +1271,7 @@ def main():
             "scored_correct": score_sample.get("correct") if score_sample else None,
             "scored_max_abs_error": score_sample.get("max_abs_error") if score_sample else None,
             "output_aliased_input": score_sample.get("output_aliased_input") if score_sample else None,
+            "delegation": score_sample.get("delegation") if score_sample else None,
         }
         scored_blob = None
         if score_sample is not None:

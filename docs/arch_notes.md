@@ -93,7 +93,7 @@ Key specifications and quirks for optimization, organized by architecture.
 
 **Quirks**:
 - Register spilling is catastrophic: local memory latency is very high relative to the fast tensor cores
-- Register rebalancing between warp groups is a key optimization lever (AVO: +2.1%)
+- Register rebalancing between warp groups is a key optimization lever
 - The 2048-register budget is NOT per-warp — it's shared across all warp groups in the SM
 
 ---

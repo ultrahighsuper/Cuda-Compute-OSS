@@ -28,7 +28,7 @@
 
 ## Acknowledgements
 
-- [ ] I read [CONTRIBUTING.md](../CONTRIBUTING.md) and [DESIGN.md](../DESIGN.md).
+- [ ] I read [CONTRIBUTING.md](https://github.com/zeokin/Cuda-Compute-OSS/blob/main/CONTRIBUTING.md) and [DESIGN.md](https://github.com/zeokin/Cuda-Compute-OSS/blob/main/DESIGN.md).
 - [ ] This PR changes **only** `kernel.py` — no other file is added, modified, or removed.
 - [ ] `kernel.py` is a real **Triton** kernel: it does **not** delegate the computation to `torch.matmul`/`mm`/`bmm`, `torch.nn.functional.*`, the `@` operator, `torch.ops.aten.*`, cuBLAS/cuDNN, or inline CUDA-C (see CONTRIBUTING § No delegation).
 - [ ] My SN74 hotkey is bound to this GitHub identity and the payload signature verifies.

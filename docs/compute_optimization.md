@@ -68,7 +68,7 @@ Quick-reference for maximizing compute throughput on NVIDIA GPUs.
   ```
 - **Branchless select**: CUDA's `__fsel(cond, a, b)` or ternary on uniform condition
 - **Sort data**: Ensure threads in same warp follow same path
-- **AVO technique**: Always compute both paths, use multiplication by 0/1 to select
+- **Branchless rescaling**: always compute both paths, use multiplication by 0/1 to select
   - Example: rescale factor = `need_rescale ? scale : 1.0` → always compute scale, multiply by 1.0 when not needed
   - Eliminates branches AND enables lighter memory fences
 
@@ -129,6 +129,6 @@ Quick-reference for maximizing compute throughput on NVIDIA GPUs.
 
 **Register rebalancing**: Each warp group may have different register needs. Allocate more registers to compute-heavy groups, fewer to data-movement groups.
 
-**AVO technique**: Adjust per-warp-group register allocation to eliminate spills in bottleneck group:
+**Rebalancing example**: adjust per-warp-group register allocation to eliminate spills in the bottleneck group:
 - Original: 192/80/48 → correction warp spills to local memory
-- Optimized: 184/88/56 → no spills, +2.1% performance
+- Optimized: 184/88/56 → no spills

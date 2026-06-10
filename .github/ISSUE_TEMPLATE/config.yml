@@ -6,4 +6,4 @@ contact_links:
 
   - name: CONTRIBUTING.md
     url: https://github.com/zeokin/Cuda-Compute-OSS/blob/main/CONTRIBUTING.md
-    about: Kernel contract, code style, PR conventions, the no-torch-delegation rule.
+    about: The one-file rule, the kernel contract, the no-delegation rule, self-scoring, and how to submit.

@@ -252,12 +252,13 @@ class _Scanner(ast.NodeVisitor):
         for dec in node.decorator_list:
             target = dec.func if isinstance(dec, ast.Call) else dec
             parts = _dotted_parts(target)
-            if parts and parts[-1] == "jit":
-                root = self.aliases.get(parts[0], parts[0])
-                if root == "triton" or parts[0] == "triton" or parts[-2:] == ["triton", "jit"]:
-                    self.found_triton_jit = True
-                elif parts[-1] == "jit":  # `from triton import jit`
-                    self.found_triton_jit = True
+            if not parts:
+                continue
+            # Resolve through the import-alias map and require TRITON's jit specifically.
+            # A bare suffix match on ".jit" would let any foreign @jit (numba.jit,
+            # numba.cuda.jit, ...) satisfy the requires-a-Triton-kernel rule.
+            if _resolve(parts, self.aliases) == "triton.jit":
+                self.found_triton_jit = True
 
     def visit_FunctionDef(self, node):
         self._record_def(node)
@@ -398,6 +399,27 @@ def kernel_fn(x, weight, eps=1e-6):
     return y
 '''
 
+# `from triton import jit as _jit` must still satisfy the requires-a-Triton-kernel rule
+# (the alias map resolves @_jit -> triton.jit).
+_CLEAN_TRITON_ALIASED_JIT = '''
+import torch
+from triton import jit as _jit
+import triton.language as tl
+
+KERNEL_TYPE = "rms_norm"
+
+@_jit
+def _copy_kernel(X, Y, N, BLOCK: tl.constexpr):
+    cols = tl.arange(0, BLOCK)
+    mask = cols < N
+    tl.store(Y + cols, tl.load(X + cols, mask=mask, other=0.0), mask=mask)
+
+def kernel_fn(x, weight, eps=1e-6):
+    y = torch.empty_like(x)
+    _copy_kernel[(1,)](x, y, x.numel(), BLOCK=1024)
+    return y
+'''
+
 # Each negative case: (label, source, expected_category_substring)
 _NEGATIVE_CASES = [
     ("delegate via F.rms_norm",
@@ -432,6 +454,15 @@ _NEGATIVE_CASES = [
       "    v = x.float().pow(2).mean(-1, keepdim=True)\n"
       "    return (x / (v + eps).sqrt()) * weight\n"),
      "not-a-kernel"),
+    ("foreign @jit (numba) is not a triton kernel",
+     ("import torch\n"
+      "import numba\n"
+      "@numba.jit\n"
+      "def _fake(x):\n"
+      "    return x\n"
+      "def kernel_fn(x, weight, eps=1e-6):\n"
+      "    return torch.empty_like(x)\n"),
+     "not-a-kernel"),
     ("aten ops escape",
      "import torch\ndef kernel_fn(a, b):\n    return torch.ops.aten.mm(a, b)\n",
      "delegation"),
@@ -441,14 +472,16 @@ _NEGATIVE_CASES = [
 def _self_test() -> int:
     failures = 0
 
-    clean = scan_source(_CLEAN_TRITON)
-    if clean:
-        failures += 1
-        print("FAIL  clean Triton kernel was flagged:")
-        for v in clean:
-            print(v)
-    else:
-        print("ok    clean Triton kernel -> 0 violations")
+    for label, src in (("clean Triton kernel", _CLEAN_TRITON),
+                       ("clean kernel via `from triton import jit as _jit`", _CLEAN_TRITON_ALIASED_JIT)):
+        clean = scan_source(src)
+        if clean:
+            failures += 1
+            print(f"FAIL  {label} was flagged:")
+            for v in clean:
+                print(v)
+        else:
+            print(f"ok    {label} -> 0 violations")
 
     for label, src, expected in _NEGATIVE_CASES:
         vios = scan_source(src)
