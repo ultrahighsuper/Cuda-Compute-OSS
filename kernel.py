@@ -1,12 +1,20 @@
-"""Baseline RMS normalization kernel (Triton).
+"""CCO submission artifact — kernel.py  (THE ONE MUTABLE FILE).
 
-One Triton program per row. Each program loads the full row,
-reduces to a single RMS scalar, then writes the row back with
-the normalization and per-column weight applied.
+This is the file you edit and submit; everything else in the repo is locked and byte-verified
+against manifest.json at your PR HEAD. It must export exactly two names:
 
-Computation is in fp32 internally regardless of input dtype, to
-match the standard RMS-norm precision discipline (bf16/fp16 squares
-underflow).
+    KERNEL_TYPE = "<one of the 5 tracks>"   # selects the oracle/config/champion you compete on
+    def kernel_fn(...): ...                  # your Triton kernel under test
+
+The seed below is a COPY of the current `rms_norm` champion, so a fresh clone self-scores out of
+the box:  `uv run benchmark.py`. To compete on a different track, REPLACE this file with your
+kernel and set KERNEL_TYPE accordingly — start from `champions/<track>/kernel.py`. (The per-track
+champions in `champions/` are the real baselines you must beat; this root copy is just a runnable
+starting point so the harness has something to import.)
+
+Rules (enforced mechanically by cco/guard_kernel.py + cco/dispatch_trap.py): Triton-only; no
+delegation to torch.matmul / F.* / torch.ops.aten.* / the `@` operator / cuBLAS; no
+get_inputs / get_flops / get_bytes. See CONTRIBUTING.md.
 """
 
 import torch
@@ -57,21 +65,3 @@ def kernel_fn(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch
         BLOCK_SIZE=BLOCK_SIZE,
     )
     return y
-
-
-def get_inputs() -> dict:
-    torch.manual_seed(0)
-    M, N = 2048, 4096
-    x = torch.randn(M, N, device="cuda", dtype=torch.bfloat16)
-    weight = torch.randn(N, device="cuda", dtype=torch.bfloat16)
-    return {"x": x, "weight": weight}
-
-
-def get_flops() -> int:
-    M, N = 2048, 4096
-    return 6 * M * N
-
-
-def get_bytes() -> int:
-    M, N = 2048, 4096
-    return (2 * M * N + N) * 2
