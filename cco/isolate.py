@@ -265,6 +265,57 @@ def _repo_root() -> str:
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def _preload_so() -> "str | None":
+    """Resolve the Tier-2 LD_PRELOAD vendor-symbol trap (runtime/cco_preload.so), if built.
+
+    Honors $CCO_PRELOAD_SO; otherwise looks next to the repo's runtime/. Returns None when the .so is
+    absent (e.g. on a dev box where it was not compiled, or Windows) — the in-Python trap still runs;
+    the LD_PRELOAD backstop is an additive defense that the trusted GPU image always builds."""
+    env = os.environ.get("CCO_PRELOAD_SO")
+    if env and os.path.isfile(env):
+        return os.path.abspath(env)
+    cand = os.path.join(_repo_root(), "runtime", "cco_preload.so")
+    return cand if os.path.isfile(cand) else None
+
+
+_PRELOAD_SELFTEST = None  # None=unchecked, True=verified, str=failure reason (cached per process)
+
+
+def _assert_preload_interposes(preload: str) -> None:
+    """FAIL-CLOSED gate: confirm the LD_PRELOAD trap actually interposes a real `torch.mm` on THIS
+    host. If a plain matmul child does NOT _exit(99), interposition is broken (static-linked cuBLAS,
+    a renamed symbol, an RTLD quirk, a stale .so) and EVERY delegation would pass silently — so we
+    refuse to score rather than hand out a free pass. Runs once per process (cached)."""
+    global _PRELOAD_SELFTEST
+    if _PRELOAD_SELFTEST is True:
+        return
+    if isinstance(_PRELOAD_SELFTEST, str):
+        raise RuntimeError(_PRELOAD_SELFTEST)
+    import subprocess as _sp
+    probe = ("import torch;"
+             "a=torch.randn(64,64,device='cuda',dtype=torch.float16);"
+             "b=(a@a); torch.cuda.synchronize()")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PYTHON")}
+    existing = env.get("LD_PRELOAD", "")
+    env["LD_PRELOAD"] = f"{preload}:{existing}" if existing else preload
+    env["LD_BIND_NOW"] = "1"
+    try:
+        p = _sp.run([sys.executable, "-E", "-c", probe], env=env,
+                    capture_output=True, text=True, timeout=180)
+    except Exception as e:  # noqa: BLE001 - any failure to run the gate is fail-closed
+        _PRELOAD_SELFTEST = f"LD_PRELOAD self-test could not run ({type(e).__name__}: {e}); refusing to score"
+        raise RuntimeError(_PRELOAD_SELFTEST) from e
+    if p.returncode == 99:
+        _PRELOAD_SELFTEST = True
+        return
+    _PRELOAD_SELFTEST = (
+        f"LD_PRELOAD vendor trap is INERT: a plain torch.mm child exited {p.returncode}, not 99 — "
+        f"symbol interposition is broken on this host (static-linked cuBLAS / renamed symbol / stale "
+        f".so). Refusing to score: a delegating kernel would pass undetected. "
+        f"stderr tail: {(p.stderr or '')[-300:]}")
+    raise RuntimeError(_PRELOAD_SELFTEST)
+
+
 def run_isolated(kernel_path: str, config: dict, seed: int, compare_fn, *,
                  n_blocks: int = 30, warmup: int = 25, rep: int = 100,
                  n_val: int = 6, n_timed: int = 4, quick: bool = False, timeout_s: float = 1200.0,
@@ -396,11 +447,38 @@ def run_isolated(kernel_path: str, config: dict, seed: int, compare_fn, *,
                 f"sys.path.append({_repo_root()!r}); "
                 "from cco.isolate import _child_main; _child_main(sys.argv[1], sys.argv[2])")
         env = {k: v for k, v in os.environ.items() if not k.startswith("PYTHON")}
+        # Tier-2 backstop: LD_PRELOAD the vendor-symbol trap into the CHILD only (the parent must keep
+        # calling cuBLAS to compute the oracle). A delegated GEMM/conv that slips past the in-Python
+        # trap hits an interposed symbol -> the child records it to CCO_DELEGATION_LOG (inside the
+        # per-run tmp; absolute so the child cwd=tmp is irrelevant) and _exit(99).
+        preload = _preload_so()
+        deleg_flag = os.path.join(tmp, "delegation.flag")
+        if preload:
+            _assert_preload_interposes(preload)          # fail-closed gate: refuse to score if inert
+            existing = env.get("LD_PRELOAD", "")
+            env["LD_PRELOAD"] = f"{preload}:{existing}" if existing else preload
+            env["CCO_DELEGATION_LOG"] = deleg_flag
+            env["LD_BIND_NOW"] = "1"                      # eager binding (belt-and-suspenders)
         cmd = [sys.executable, "-E", "-c", boot, job_path, out_path]
 
         t0 = time.perf_counter()
         proc = subprocess.run(cmd, cwd=tmp, env=env, capture_output=True, text=True, timeout=timeout_s)
         child_wall_s = time.perf_counter() - t0
+
+        # Tier-2 vendor trap fired: exit 99 (unforgeable) OR the flag file was written. The flag FILE is
+        # the trusted symbol source (stderr is forgeable — a kernel can close fd 2 before delegating).
+        shim_sym = None
+        if os.path.exists(deleg_flag):
+            try:
+                with open(deleg_flag, encoding="utf-8") as f:
+                    shim_sym = f.read().strip() or None
+            except OSError:
+                pass
+        if proc.returncode == 99 or shim_sym:
+            return {**base, "correct": False, "max_abs_error": 0.0,
+                    "delegation": f"vendor symbol {shim_sym or 'unknown'} (LD_PRELOAD no-delegation trap)",
+                    "stages": fail_stages, "latencies_us": [], "median_us": 0.0, "mean_us": 0.0,
+                    "stdev_us": 0.0, "child_wall_s": child_wall_s}
 
         if proc.returncode != 0 or not os.path.exists(out_path):
             return {**base, "correct": False, "max_abs_error": 0.0, "delegation": None,
@@ -708,6 +786,23 @@ def kernel_fn(x, weight, eps=1e-6):
     return y
 '''
 
+# Pops the in-Python trap WITHIN the call (the documented uncloseable-in-process case) and delegates a
+# matmul to cuBLAS. The popped trap is blind, so ONLY the Tier-2 LD_PRELOAD vendor-symbol trap can
+# catch it. Run only when runtime/cco_preload.so is built.
+_POP_DELEGATE = '''
+import torch, triton, triton.language as tl
+KERNEL_TYPE = "rms_norm"
+@triton.jit
+def _noop(X):
+    pass
+def kernel_fn(x, weight, eps=1e-6):
+    from torch.overrides import _pop_mode_temporarily as fp
+    from torch.utils._python_dispatch import _pop_mode_temporarily as dp
+    with fp(), dp():
+        _ = torch.mm(x, x.t())     # vendor GEMM with the in-Python trap popped -> only LD_PRELOAD sees it
+    return torch.empty_like(x)
+'''
+
 
 def _self_test() -> int:
     import torch
@@ -795,6 +890,14 @@ def _self_test() -> int:
           "stale-replay (real work, but ignores the per-call input mutation) -> "
           f"CAUGHT by the timed-output probe (probe_ok={r.get('probe_ok')}, "
           f"median {r['median_us']:.2f}us above floor {r.get('roofline_floor_us', 0):.2f}us)")
+
+    if _preload_so():
+        r = run(_POP_DELEGATE)
+        check(not r["correct"] and "LD_PRELOAD" in (r.get("delegation") or ""),
+              f"pop-the-trap + delegate to cuBLAS -> CAUGHT by the LD_PRELOAD vendor trap "
+              f"(Tier 2): {r.get('delegation')}")
+    else:
+        print("skip  LD_PRELOAD vendor-trap case (runtime/cco_preload.so not built)")
 
     print("-" * 60)
     print("SELF-TEST PASSED" if not failures else f"SELF-TEST FAILED: {failures} case(s)")

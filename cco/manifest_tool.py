@@ -49,7 +49,10 @@ DEFAULT_LOCKED_PATHS = [
 ]
 
 IGNORE_DIRNAMES = {"__pycache__", ".git", ".pytest_cache", ".ruff_cache", ".mypy_cache"}
-IGNORE_SUFFIXES = (".pyc", ".pyo", ".pyd")
+# .so: a COMPILED build artifact (the LD_PRELOAD vendor trap, runtime/cco_preload.so) — its source
+# (runtime/cco_preload.c) IS pinned, and the runtime image rebuilds the .so from that source, so the
+# binary is not committed/pinned (it is platform-specific). Nothing in CCO auto-loads .so files.
+IGNORE_SUFFIXES = (".pyc", ".pyo", ".pyd", ".so")
 IGNORE_BASENAMES = {".DS_Store", ".gitkeep"}
 
 
