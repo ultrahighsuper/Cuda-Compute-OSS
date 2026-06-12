@@ -649,15 +649,19 @@ def run_isolated(kernel_path: str, config: dict, seed: int, compare_fn, *,
             wall_per_iter_us = (timed_wall_s / denom * 1e6) if denom else 0.0
             if sum(latencies_us) * rep / 1e6 > child_wall_s:          # outer backstop
                 timing_inconsistent = True
-            # Scale anchor (backstop to the static torch.cuda.Stream/graph ban): the captured-clock wall
-            # — which the kernel cannot patch, and which the full-device sync makes count any side-stream
-            # work — bounds the cuda-event sample. MEASURED: honest champions run at event_med ~0.965-
-            # 0.982 x wall_per_iter (the wall only adds the small per-iter launch/python overhead), so
-            # 0.85x leaves a comfortable margin while rejecting a side-stream under-reporter that parks
-            # its events at ~0.8x its real (wall) time. Full immunity to a <1.18x under-report would need
-            # parent-driven two-point wall timing (a documented v2 follow-up); the stream ban is the
-            # primary closure of the side-stream channel.
-            if wall_per_iter_us > 0 and event_med_us < wall_per_iter_us * 0.85:  # scale anchor
+            # Scale anchor (COARSE backstop to the static torch.cuda.Stream/graph ban): the captured-clock
+            # wall — which the kernel cannot patch, and which the full-device sync makes count any
+            # side-stream work — bounds the cuda-event sample. A REAL side-stream offload drives this ratio
+            # toward ZERO: the timed default-stream events bracket only the per-call mutation launch while
+            # the heavy work runs on the side stream (the wall still captures it via the full-device sync),
+            # so event_med << wall. Honest kernels sit near 1.0 but with real jitter — MEASURED 0.96-0.98
+            # at production scale (30x100), and as low as ~0.81 at the tiny self-test scale (5x20) where the
+            # ratio is noisy. The threshold must stay BELOW that honest noise floor so it never false-rejects
+            # an honest miner (a far worse outcome than a coarse backstop missing a contrived partial
+            # offload, which the static stream ban already rejects); 0.5 catches a real (~0-0.15) offload
+            # with wide margin while clearing honest noise. Precise sub-2x detection needs parent-driven
+            # two-point wall timing (a documented v2 follow-up); the static stream ban is the PRIMARY closure.
+            if wall_per_iter_us > 0 and event_med_us < wall_per_iter_us * 0.5:  # coarse scale anchor
                 timing_inconsistent = True
             if floor_us > 0 and event_med_us < floor_us:              # absolute roofline floor
                 below_floor = True

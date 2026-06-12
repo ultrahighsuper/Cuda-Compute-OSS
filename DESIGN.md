@@ -126,8 +126,10 @@ file is also deleted before the kernel loads (`open` is banned), the kernel is i
 module-level trampoline, and the CUDA allocator readout (`torch.cuda.memory_*`) is banned so the extra
 buffer cloned at a probed call leaks nothing. A schedule-aware kernel therefore cannot do real work only
 where it is observed: it must be correct on **every** timed call or risk the probe. An **absolute
-roofline floor** (`max(bytes/peak_bw, flops/peak_flops)`) plus a captured-clock wall anchor (event
-median ≥ 0.85× the per-iter wall) reject any physically-impossible or side-stream-under-reported median;
+roofline floor** (`max(bytes/peak_bw, flops/peak_flops)`) plus a coarse captured-clock wall anchor (event
+median ≥ 0.5× the per-iter wall — a real side-stream offload drives that ratio toward zero, while honest
+kernels sit near 1.0, so the threshold stays below the honest noise floor to never false-reject) reject
+any physically-impossible or grossly side-stream-under-reported median;
 creating CUDA streams/events/graphs (the side-stream channel) is itself statically banned. The static
 guard is **re-run inside the scoring subprocess on the exact bytes about to execute**, so none of these
 bans can be skipped by reaching the timed run unscanned. Together these close memoize-and-replay
@@ -162,7 +164,7 @@ SDPA, row-wise fp8, int4-pack) is shim-blind; those remain guarded only by the s
 | Dynamic dispatch to a banned op (aliasing, `getattr`/`eval`, `torch.__dict__['matmul']`) | builtins ban + introspection-dunder ban + import-alias resolution in the static guard | no (any GEMM that does execute still hits the runtime trap + the shim) |
 | Walk the call stack to read the secret probe schedule (`e.__traceback__.tb_frame.f_back.f_locals`) | static guard bans the frame/traceback/code/closure attribute family **and every string-keyed route to it** — `getattr` (builtin), the `operator` module (`attrgetter`/`methodcaller`, not importable), and `str.format` field access — so frame-walking is inexpressible, not merely unnamed; job-file deletion + trampoline as backstops; the guard is **re-run inside the scoring subprocess** | a future string-keyed attribute accessor in an allowlisted module would reopen the class — the allowlist is kept minimal to bound this; no in-process runtime catch exists for a passive frame read |
 | Infer the probe schedule from the extra buffer cloned at a probed call | `torch.cuda.memory_allocated`/`memory_stats`/`mem_get_info`/… are statically banned, so the kernel cannot read allocator deltas; it also cannot time itself (no `Event`, no `time` import) | low-severity even unbanned (allocator churn is noisy); banned outright regardless |
-| Under-report timing via a side CUDA stream / graph (correct work, fast events) | static ban of `torch.cuda.Stream`/`Event`/`CUDAGraph` (Triton uses the current timed stream) **+** captured-clock wall anchor (event median ≥ 0.85× per-iter wall) | a `<1.18×` under-report on a Gate-3-bypassed run needs parent two-point wall timing (v2) |
+| Under-report timing via a side CUDA stream / graph (correct work, fast events) | static ban of `torch.cuda.Stream`/`Event`/`CUDAGraph` (Triton uses the current timed stream — the PRIMARY closure) **+** a coarse captured-clock wall anchor (event median ≥ 0.5× per-iter wall; a real offload drives the ratio toward 0) | a contrived *partial* offload on a Gate-3-bypassed run that parks the ratio above the anchor needs parent two-point wall timing (v2); the anchor is kept below the honest noise floor to never false-reject |
 | Reach the scored GPU run without the static guard (Gate 3 → Gate 4 gap / TOCTOU) | the static guard is **re-scanned inside the scoring subprocess on the exact bytes about to `exec`**; any violation aborts as a delegation result before the kernel loads | no |
 | Inline CUDA-C escape | banned in v1 (guard rejects `cpp_extension`) | n/a in v1 |
 | Memorize / hardcode outputs for known inputs | PR-HEAD-seeded inputs the kernel **never sees** (process isolation); oracle re-derives truth | no |
