@@ -169,8 +169,12 @@ def evaluate(ev: EvalConfig) -> dict:
             latency, peak_vram, flop_ratio, exact_latency, exact_peak_vram
         )
         improvement = (not gated) and cost_dominant
+        # Raw performance figure, kept for transparency: it must NOT be gated by
+        # the accuracy floor, or it collapses to 0 for exactly the gated rows it
+        # exists to expose (e.g. the full-rank reference regime). The floor is
+        # applied only to the ranking ``score`` below.
         perf_score = metrics.score(
-            acc, peak_vram, latency, ev.accuracy_floor, ev.vram_unit
+            acc, peak_vram, latency, 0.0, ev.vram_unit
         )
         results[name] = {
             "accuracy": acc,
