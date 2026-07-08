@@ -116,17 +116,17 @@
     },
     {
       "author": "boskodev790",
-      "detail": "matches an earlier PR by luciferlive112116: 100% of added lines already appear in an earlier PR",
+      "detail": "CPU-safe CI only; no GPU scorecard or queue entry required.",
       "gpu_required": false,
-      "head_sha": "fd22d14e4429d5c5df6b84ea40813021be2148de",
-      "kind": "docs",
-      "label": "copycat",
-      "pr": 119,
-      "state": "copycat_block",
-      "title": "docs(matmul): recompute FLOP table cells with decimal n",
-      "url": "https://github.com/zeokin/Cuda-Compute-OSS/pull/119"
+      "head_sha": "eccddc1beb976259fc295d47cd2bc774cbcae192",
+      "kind": "fix",
+      "label": "status:ready-non-gpu",
+      "pr": 120,
+      "state": "non_gpu_review",
+      "title": "fix(config): reject a non-positive tile instead of silently miscomputing",
+      "url": "https://github.com/zeokin/Cuda-Compute-OSS/pull/120"
     }
   ],
   "queue": [],
-  "updated": "2026-07-08T15:36:08+00:00"
+  "updated": "2026-07-08T15:56:45+00:00"
 }
