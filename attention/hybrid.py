@@ -124,20 +124,9 @@ def _pad_to_blocks(x, *, blocks: int):
     return torch.cat([x, pad], dim=-2), seq, block
 
 
-def landmark_global_attention(
-    q,
-    k,
-    v,
-    *,
-    num_landmarks: int = 64,
-    causal: bool = False,
-):
-    """Approximate global attention by attending to pooled K/V landmarks."""
+def _pooled_landmarks(k, v, *, num_landmarks: int):
     torch = _torch()
-    if num_landmarks <= 0:
-        raise ValueError("num_landmarks must be > 0")
-
-    batch, heads, seq, dim = q.shape
+    batch, heads, seq, dim = k.shape
     landmarks = min(num_landmarks, seq)
     k_pad, _seq, block = _pad_to_blocks(k, blocks=landmarks)
     v_pad, _seq, _block = _pad_to_blocks(v, blocks=landmarks)
@@ -145,7 +134,7 @@ def landmark_global_attention(
     k_blocks = k_pad.reshape(batch, heads, landmarks, block, dim)
     v_blocks = v_pad.reshape(batch, heads, landmarks, block, dim)
 
-    counts = torch.full((landmarks,), block, device=q.device, dtype=q.real.dtype)
+    counts = torch.full((landmarks,), block, device=k.device, dtype=k.real.dtype)
     extra = block * landmarks - seq
     if extra:
         counts[-1] = block - extra
@@ -153,16 +142,72 @@ def landmark_global_attention(
 
     k_landmarks = k_blocks.sum(dim=-2) / counts
     v_landmarks = v_blocks.sum(dim=-2) / counts
+    positions = (
+        torch.arange(landmarks, device=k.device) * block
+        + counts.reshape(landmarks).to(torch.long)
+        - 1
+    )
+    return k_landmarks, v_landmarks, positions
+
+
+def _topk_landmarks(q, k, v, *, num_landmarks: int):
+    torch = _torch()
+    batch, heads, seq, dim = k.shape
+    landmarks = min(num_landmarks, seq)
+
+    # Use alignment with the mean query direction as a cheap, deterministic
+    # proxy for "globally relevant" tokens, then break ties with key magnitude.
+    # This keeps selection query-aware without materializing full n x n scores.
+    q_mean = q.to(torch.float32).mean(dim=-2, keepdim=True)
+    align = torch.abs((k.to(torch.float32) * q_mean).sum(dim=-1))
+    norm = torch.linalg.vector_norm(k.to(torch.float32), dim=-1)
+    scores = align + 0.05 * norm
+    topk = torch.topk(scores, k=landmarks, dim=-1).indices
+    topk, _ = torch.sort(topk, dim=-1)
+
+    gather = topk[..., None].expand(batch, heads, landmarks, dim)
+    k_landmarks = torch.gather(k, dim=-2, index=gather)
+    v_landmarks = torch.gather(v, dim=-2, index=gather)
+    return k_landmarks, v_landmarks, topk
+
+
+def landmark_global_attention(
+    q,
+    k,
+    v,
+    *,
+    num_landmarks: int = 64,
+    causal: bool = False,
+    policy: str = "pooled",
+):
+    """Approximate global attention by attending to selected K/V landmarks."""
+    torch = _torch()
+    if num_landmarks <= 0:
+        raise ValueError("num_landmarks must be > 0")
+    if policy not in {"pooled", "topk"}:
+        raise ValueError("policy must be one of: pooled, topk")
+
+    _batch, _heads, seq, dim = q.shape
+    if policy == "pooled":
+        k_landmarks, v_landmarks, positions = _pooled_landmarks(
+            k, v, num_landmarks=num_landmarks
+        )
+    else:
+        k_landmarks, v_landmarks, positions = _topk_landmarks(
+            q, k, v, num_landmarks=num_landmarks
+        )
 
     scores = torch.matmul(q, k_landmarks.transpose(-1, -2)) / math.sqrt(float(dim))
     if causal:
         q_pos = torch.arange(seq, device=q.device)[:, None]
-        landmark_end = (
-            torch.arange(landmarks, device=q.device)[None, :] * block
-            + counts.reshape(1, landmarks).to(torch.long)
-            - 1
+        if policy == "pooled":
+            landmark_pos = positions.view(1, 1, -1)
+        else:
+            landmark_pos = positions
+        scores = scores.masked_fill(
+            landmark_pos[:, :, None, :] > q_pos[None, None, :, :],
+            float("-inf"),
         )
-        scores = scores.masked_fill(landmark_end[None, None, :, :] > q_pos[None, None, :, :], float("-inf"))
     weights = torch.softmax(scores, dim=-1)
     return torch.matmul(weights, v_landmarks)
 
@@ -236,8 +281,9 @@ def landmark_hybrid_attention(
     local_weight: float = 0.85,
     global_weight: float = 0.15,
     num_landmarks: int = 64,
+    landmark_policy: str = "pooled",
 ):
-    """Combine local exact attention with pooled-landmark global attention."""
+    """Combine local exact attention with landmark-based global attention."""
     lw, gw = _normalized_weights(local_weight, global_weight)
     local = local_window_attention(
         q, k, v, window=window, causal=causal, block_size=block_size
@@ -245,6 +291,6 @@ def landmark_hybrid_attention(
     if gw == 0:
         return local
     global_ = landmark_global_attention(
-        q, k, v, num_landmarks=num_landmarks, causal=causal
+        q, k, v, num_landmarks=num_landmarks, causal=causal, policy=landmark_policy
     )
     return lw * local + gw * global_

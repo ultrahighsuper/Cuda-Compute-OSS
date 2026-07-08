@@ -69,6 +69,7 @@ def run_once(
     freq_decay: float = 1.0,
     gate_strength: float = 0.25,
     landmarks: int = 64,
+    landmark_policy: str = "pooled",
     mode: str = "fixed",
     causal: bool = False,
     seed: int = 0,
@@ -78,8 +79,8 @@ def run_once(
     from .hybrid import adaptive_hybrid_attention, hybrid_attention, landmark_hybrid_attention
     from .reference import exact_attention
 
-    if mode not in {"fixed", "adaptive", "landmark", "both", "all"}:
-        raise ValueError("mode must be one of: fixed, adaptive, landmark, both, all")
+    if mode not in {"fixed", "adaptive", "landmark", "topk", "both", "all"}:
+        raise ValueError("mode must be one of: fixed, adaptive, landmark, topk, both, all")
 
     spec = AttentionSpec(
         batch=batch,
@@ -115,7 +116,7 @@ def run_once(
             freq_decay=freq_decay,
             gate_strength=gate_strength,
         )
-    if mode in {"landmark", "all"}:
+    if mode in {"landmark", "topk", "all"}:
         _ = landmark_hybrid_attention(
             q[:, :, : min(seq, 64), :],
             k[:, :, : min(seq, 64), :],
@@ -125,6 +126,7 @@ def run_once(
             local_weight=local_weight,
             global_weight=global_weight,
             num_landmarks=min(landmarks, min(seq, 64)),
+            landmark_policy="topk" if mode == "topk" else landmark_policy,
         )
     _synchronize(dev)
 
@@ -160,6 +162,17 @@ def run_once(
             local_weight=local_weight,
             global_weight=global_weight,
             num_landmarks=landmarks,
+            landmark_policy=landmark_policy,
+        )
+    if mode in {"topk", "all"}:
+        candidate_fns["topk"] = lambda: landmark_hybrid_attention(
+            q, k, v,
+            window=window,
+            causal=causal,
+            local_weight=local_weight,
+            global_weight=global_weight,
+            num_landmarks=landmarks,
+            landmark_policy="topk",
         )
 
     candidates = {}
@@ -192,6 +205,7 @@ def run_once(
             "mode": mode,
             "gate_strength": gate_strength,
             "landmarks": landmarks,
+            "landmark_policy": landmark_policy,
         },
         "exact": {
             "latency_s": exact_s,
@@ -227,7 +241,8 @@ def main(argv=None) -> int:
     parser.add_argument("--freq-decay", type=float, default=1.0)
     parser.add_argument("--gate-strength", type=float, default=0.25)
     parser.add_argument("--landmarks", type=int, default=64)
-    parser.add_argument("--mode", choices=("fixed", "adaptive", "landmark", "both", "all"), default="fixed")
+    parser.add_argument("--landmark-policy", choices=("pooled", "topk"), default="pooled")
+    parser.add_argument("--mode", choices=("fixed", "adaptive", "landmark", "topk", "both", "all"), default="fixed")
     parser.add_argument("--causal", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="auto")
@@ -246,6 +261,7 @@ def main(argv=None) -> int:
         freq_decay=args.freq_decay,
         gate_strength=args.gate_strength,
         landmarks=args.landmarks,
+        landmark_policy=args.landmark_policy,
         mode=args.mode,
         causal=args.causal,
         seed=args.seed,

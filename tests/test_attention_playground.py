@@ -110,6 +110,15 @@ def test_landmark_global_attention_matches_exact_with_one_landmark_per_token():
     assert torch.allclose(landmark, exact, atol=1e-5, rtol=1e-5)
 
 
+def test_topk_landmark_global_attention_matches_exact_with_one_landmark_per_token():
+    if _skip_if_no_torch():
+        return
+    q, k, v = _sample(seq=12, dim=4)
+    exact = exact_attention(q, k, v)
+    landmark = landmark_global_attention(q, k, v, num_landmarks=12, policy="topk")
+    assert torch.allclose(landmark, exact, atol=1e-5, rtol=1e-5)
+
+
 def test_hybrid_equals_local_when_global_weight_is_zero():
     if _skip_if_no_torch():
         return
@@ -156,6 +165,23 @@ def test_landmark_hybrid_equals_local_when_global_weight_is_zero():
     assert torch.allclose(hybrid, local, atol=1e-5, rtol=1e-5)
 
 
+def test_topk_landmark_hybrid_equals_local_when_global_weight_is_zero():
+    if _skip_if_no_torch():
+        return
+    q, k, v = _sample(seq=14, dim=5)
+    local = local_window_attention(q, k, v, window=3, block_size=4)
+    hybrid = landmark_hybrid_attention(
+        q, k, v,
+        window=3,
+        block_size=4,
+        local_weight=1.0,
+        global_weight=0.0,
+        num_landmarks=4,
+        landmark_policy="topk",
+    )
+    assert torch.allclose(hybrid, local, atol=1e-5, rtol=1e-5)
+
+
 def test_attention_benchmark_can_compare_both_modes():
     if _skip_if_no_torch():
         return
@@ -193,8 +219,9 @@ def test_attention_benchmark_can_compare_all_modes():
         landmarks=4,
         device="cpu",
     )
-    assert set(result["candidates"]) == {"fixed", "adaptive", "landmark"}
+    assert set(result["candidates"]) == {"fixed", "adaptive", "landmark", "topk"}
     assert "quality" in result["candidates"]["landmark"]
+    assert "quality" in result["candidates"]["topk"]
 
 
 if __name__ == "__main__":
