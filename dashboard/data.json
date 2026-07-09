@@ -18,23 +18,10 @@
       "pr": 127,
       "state": "non_gpu_review",
       "title": "fix(strategy): delegate CPUBackend.host_available_bytes to shared cross-platform helper",
-      "updated_at": "2026-07-09T23:05:06Z",
+      "updated_at": "2026-07-09T23:23:29Z",
       "url": "https://github.com/zeokin/Cuda-Compute-OSS/pull/127"
-    },
-    {
-      "author": "zeokin",
-      "detail": "CPU-safe CI only; no GPU scorecard or queue entry required.",
-      "gpu_required": false,
-      "head_sha": "c9c663a4c369fad512a5cb8c82346f0ed60af05d",
-      "kind": "fix",
-      "label": "status:ready-non-gpu",
-      "pr": 128,
-      "state": "non_gpu_review",
-      "title": "fix: repair dead rewards link on landing page",
-      "updated_at": "2026-07-09T23:14:25Z",
-      "url": "https://github.com/zeokin/Cuda-Compute-OSS/pull/128"
     }
   ],
   "queue": [],
-  "updated": "2026-07-09T23:16:12+00:00"
+  "updated": "2026-07-09T23:52:33+00:00"
 }
