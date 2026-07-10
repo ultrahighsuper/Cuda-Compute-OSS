@@ -33,13 +33,24 @@ _DEFAULT_ROW_BLOCK_FRACTION = 0.3
 
 
 def _row_block(n: int, cols: int, backend: Backend, item_bytes: int,
-               frac: float = _DEFAULT_ROW_BLOCK_FRACTION) -> int:
+               frac: float = _DEFAULT_ROW_BLOCK_FRACTION,
+               out_cols: int = 0, fixed_bytes: int = 0) -> int:
     """Choose how many rows of an (n x cols) stream to stage on the device.
 
     ``frac`` is the fraction of free device memory one row-block may use
-    (``Config.vram_fraction`` when driven by the strategy)."""
-    budget = int(backend.free_compute_bytes() * frac)
-    per_row = max(1, cols * item_bytes)
+    (``Config.vram_fraction`` when driven by the strategy).
+
+    A block costs more than the rows it stages: each iteration also allocates the
+    GEMM output, which cannot alias its operands and is live alongside the staged
+    block. ``out_cols`` is the number of output columns produced *per staged row*
+    (so the real per-row cost is ``(cols + out_cols) * item_bytes``);
+    ``fixed_bytes`` is any per-iteration allocation whose size does not scale with
+    the block (e.g. ``stream_gemm_left_t``'s full ``(n, m)`` product), and is taken
+    off the budget up front. Counting only ``cols`` under-budgets the block by up
+    to 2x at ``M = N`` (see #138, and #95 for the same fix in ``matmul/gemm.py``).
+    """
+    budget = int(backend.free_compute_bytes() * frac) - int(fixed_bytes)
+    per_row = max(1, (cols + out_cols) * item_bytes)
     return int(min(n, max(1, budget // per_row)))
 
 
@@ -52,7 +63,9 @@ def stream_gemm_right(X, Q, backend: Backend, dtype,
     xp = backend.xp
     n, m = X.shape[0], Q.shape[1]
     out = xp.empty((n, m), dtype=dtype)
-    blk = _row_block(n, X.shape[1], backend, np.dtype(dtype).itemsize, frac)
+    # each block also allocates matmul(Xr, Q) -> (blk, m): m output cols per row.
+    blk = _row_block(n, X.shape[1], backend, np.dtype(dtype).itemsize, frac,
+                     out_cols=m)
     for r0 in range(0, n, blk):
         r1 = min(n, r0 + blk)
         Xr = backend.to_device(np.asarray(X[r0:r1, :]).astype(dtype, copy=False))
@@ -67,7 +80,11 @@ def stream_gemm_left_t(X, Q, backend: Backend, dtype,
     xp = backend.xp
     n, m = X.shape[0], Q.shape[1]
     acc = xp.zeros((n, m), dtype=dtype)
-    blk = _row_block(n, X.shape[1], backend, np.dtype(dtype).itemsize, frac)
+    # matmul(Xr.T, Q[rb]) is (n, m) regardless of the block size, so it is a
+    # fixed per-iteration cost rather than a per-row one.
+    item = np.dtype(dtype).itemsize
+    blk = _row_block(n, X.shape[1], backend, item, frac,
+                     fixed_bytes=n * m * item)
     for r0 in range(0, n, blk):
         r1 = min(n, r0 + blk)
         Xr = backend.to_device(np.asarray(X[r0:r1, :]).astype(dtype, copy=False))
@@ -82,7 +99,11 @@ def compress(X, Q, backend: Backend, dtype,
     xp = backend.xp
     n, m = X.shape[0], Q.shape[1]
     acc = xp.zeros((m, m), dtype=dtype)
-    blk = _row_block(n, X.shape[1], backend, np.dtype(dtype).itemsize, frac)
+    # per block: matmul(Xr, Q) -> (blk, m) (m cols per row), then the (m, m)
+    # product folded into acc -- a fixed per-iteration temporary.
+    item = np.dtype(dtype).itemsize
+    blk = _row_block(n, X.shape[1], backend, item, frac,
+                     out_cols=m, fixed_bytes=m * m * item)
     for r0 in range(0, n, blk):
         r1 = min(n, r0 + blk)
         Xr = backend.to_device(np.asarray(X[r0:r1, :]).astype(dtype, copy=False))
@@ -101,9 +122,12 @@ def reconstruct(Ctil, Q, C_out, backend: Backend, out_dtype,
     the row-block by 2x and risk OOM on large-N / tight-``vram_fraction`` runs.
     ``compute_dtype=None`` falls back to ``out_dtype`` (they match unless bumped).
     """
-    n = Q.shape[0]
+    n, m = Q.shape
     item_dtype = compute_dtype if compute_dtype is not None else out_dtype
-    blk = _row_block(n, n, backend, np.dtype(item_dtype).itemsize, frac)
+    # per row: the (rb, n) product plus the (rb, m) intermediate Q[rb] @ Ctil,
+    # which is still live while the outer matmul against QT runs.
+    blk = _row_block(n, n, backend, np.dtype(item_dtype).itemsize, frac,
+                     out_cols=m)
     QT = Q.T
     for r0 in range(0, n, blk):
         r1 = min(n, r0 + blk)
