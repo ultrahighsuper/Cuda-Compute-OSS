@@ -190,20 +190,22 @@ def _pooled_landmarks(k, v, *, num_landmarks: int):
     k_blocks = k_pad.reshape(batch, heads, landmarks, block, dim)
     v_blocks = v_pad.reshape(batch, heads, landmarks, block, dim)
 
-    counts = torch.full((landmarks,), block, device=k.device, dtype=k.real.dtype)
-    extra = block * landmarks - seq
-    if extra:
-        counts[-1] = block - extra
-    counts = counts.clamp_min(1.0).view(1, 1, landmarks, 1)
+    # Real (non-padding) token count per block: block i covers [i*block, (i+1)*block),
+    # so it holds clamp(seq - i*block, 0, block) real tokens. This varies per block --
+    # when the tail padding spans more than one block (block*landmarks - seq >= block),
+    # the boundary block is partial and trailing blocks are pure padding, so we cannot
+    # assume a single fixed `block` with only the LAST block corrected.
+    idx = torch.arange(landmarks, device=k.device)
+    counts = (seq - idx * block).clamp(min=0, max=block)      # (landmarks,) real tokens
+    valid = counts > 0                                        # fully-padding blocks -> no landmark
+    denom = counts.clamp_min(1).to(k.real.dtype).view(1, 1, landmarks, 1)
 
-    k_landmarks = k_blocks.sum(dim=-2) / counts
-    v_landmarks = v_blocks.sum(dim=-2) / counts
-    positions = (
-        torch.arange(landmarks, device=k.device) * block
-        + counts.reshape(landmarks).to(torch.long)
-        - 1
-    )
-    return k_landmarks, v_landmarks, positions
+    k_landmarks = k_blocks.sum(dim=-2) / denom
+    v_landmarks = v_blocks.sum(dim=-2) / denom
+    # Causal position = index of the LAST real token in the block; invalid (all-padding)
+    # blocks get `seq` (>= every query index) so the causal mask also drops them.
+    positions = torch.where(valid, idx * block + counts - 1, torch.full_like(idx, seq))
+    return k_landmarks, v_landmarks, positions, valid
 
 
 def _topk_landmarks(q, k, v, *, num_landmarks: int):
@@ -244,8 +246,9 @@ def landmark_global_attention(
         raise ValueError("policy must be one of: pooled, topk")
 
     _batch, _heads, seq, dim = q.shape
+    valid = None
     if policy == "pooled":
-        k_landmarks, v_landmarks, positions = _pooled_landmarks(
+        k_landmarks, v_landmarks, positions, valid = _pooled_landmarks(
             k, v, num_landmarks=num_landmarks
         )
     else:
@@ -254,6 +257,11 @@ def landmark_global_attention(
         )
 
     scores = torch.matmul(q, k_landmarks.transpose(-1, -2)) / math.sqrt(float(dim))
+    if valid is not None:
+        # Drop pooled landmarks that are entirely padding (no real tokens) -- an
+        # all-zero landmark would otherwise still collect softmax weight and drag
+        # the output toward zero. Applies in both causal and non-causal modes.
+        scores = scores.masked_fill(~valid.view(1, 1, 1, -1), float("-inf"))
     if causal:
         q_pos = torch.arange(seq, device=q.device)[:, None]
         if policy == "pooled":
