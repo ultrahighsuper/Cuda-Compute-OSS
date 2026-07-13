@@ -78,7 +78,7 @@ floored at 64 for small `n` (so `n = 256` gives `M = 64`, not 32); set it with
 `--rank-m`.)
 
 Key flags: `--n`, `--dtype {fp16,fp32,fp64}`, `--rank-m M`, `--transform`,
-`--compare`, `--fill {lowrank,random,iota,zeros}`, `--data-rank`, `--storage`,
+`--compare`, `--fill {lowrank,random,decaying-spectrum,iota,zeros}`, `--data-rank`, `--storage`,
 `--device`, `--verify`.
 
 Compute is **GPU-only** — PyTorch on **CUDA → Apple MPS**. Every product in this
