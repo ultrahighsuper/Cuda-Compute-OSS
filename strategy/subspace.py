@@ -18,6 +18,7 @@ Standalone: no imports from the sibling `matmul` package.
 """
 from __future__ import annotations
 
+import inspect
 import math
 
 import numpy as np
@@ -208,12 +209,17 @@ def multiply_subspace(A, B, C, backend: Backend, cfg: Config) -> dict:
         raise ValueError(f"rank_m must be in [1, n]; got {m} for n={n}")
     cdt = cfg.compute_dtype
 
+    frac = cfg.vram_fraction
     transform = get_transform(cfg.transform, cfg.transform_seed)
-    Q = transform.basis(n, m, backend, cdt, A=A, B=B)     # (n, m) orthonormal
+    # Give the basis stage the same VRAM budget as compress/reconstruct. Pass frac
+    # only if the transform accepts it, so custom transforms with the older
+    # basis(...) signature keep working.
+    if "frac" in inspect.signature(transform.basis).parameters:
+        Q = transform.basis(n, m, backend, cdt, A=A, B=B, frac=frac)  # (n, m) orthonormal
+    else:
+        Q = transform.basis(n, m, backend, cdt, A=A, B=B)
     if Q.shape != (n, m):
         raise ValueError(f"transform returned basis {Q.shape}, expected {(n, m)}")
-
-    frac = cfg.vram_fraction
     Atil = compress(A, Q, backend, cdt, frac)             # (m, m)
     Btil = compress(B, Q, backend, cdt, frac)             # (m, m)
     Ctil = backend.matmul(Atil, Btil)                     # (m, m)  -- cheap core

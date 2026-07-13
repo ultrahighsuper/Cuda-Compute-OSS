@@ -14,9 +14,9 @@ Add your own (this is the updatable hook):
 
     class MyTransform(Transform):
         name = "mine"
-        def basis(self, n, m, backend, dtype, A=None, B=None):
+        def basis(self, n, m, backend, dtype, A=None, B=None, frac=None):
             Q = ...            # (n, m) array on backend.xp, ORTHONORMAL columns
-            return Q
+            return Q           # pass frac to any streamed stream_gemm_* helpers
     register_transform("mine", MyTransform)
 
 Then select it with Config(transform="mine") or --transform mine.
@@ -37,7 +37,12 @@ class Transform:
     def __init__(self, seed: int = 0):
         self.seed = seed
 
-    def basis(self, n: int, m: int, backend, dtype, A=None, B=None):
+    def basis(self, n: int, m: int, backend, dtype, A=None, B=None, frac=None):
+        """Return an (n, m) orthonormal basis. ``frac`` is the fraction of free
+        device memory a streamed row-block may use (``Config.vram_fraction`` when
+        driven by the strategy); forward it to any ``stream_gemm_*`` helpers so the
+        basis stage honours the same VRAM budget as compress/reconstruct. ``None``
+        means "use the streaming default"."""
         raise NotImplementedError
 
     def basis_flops(self, n: int, m: int) -> float:
@@ -66,10 +71,20 @@ class RandomizedSVDTransform(Transform):
 
     name = "rsvd"
 
-    def basis(self, n, m, backend, dtype, A=None, B=None):
+    def basis(self, n, m, backend, dtype, A=None, B=None, frac=None):
         if A is None or B is None:
             raise ValueError("rsvd transform needs A and B")
-        from .subspace import stream_gemm_right, stream_gemm_left_t
+        from .subspace import (
+            _DEFAULT_ROW_BLOCK_FRACTION,
+            stream_gemm_left_t,
+            stream_gemm_right,
+        )
+
+        # Honour the strategy's VRAM budget (Config.vram_fraction) for the sketch
+        # row-blocks, like compress/reconstruct do -- otherwise the basis stage
+        # silently uses the 0.3 default and can OOM at a low --vram-fraction.
+        if frac is None:
+            frac = _DEFAULT_ROW_BLOCK_FRACTION
 
         xp = backend.xp
         base, rem = divmod(m, 4)
@@ -83,13 +98,13 @@ class RandomizedSVDTransform(Transform):
 
         parts = []
         if widths[0]:
-            parts.append(stream_gemm_right(A, omega(widths[0]), backend, dtype))
+            parts.append(stream_gemm_right(A, omega(widths[0]), backend, dtype, frac))
         if widths[1]:
-            parts.append(stream_gemm_left_t(A, omega(widths[1]), backend, dtype))
+            parts.append(stream_gemm_left_t(A, omega(widths[1]), backend, dtype, frac))
         if widths[2]:
-            parts.append(stream_gemm_right(B, omega(widths[2]), backend, dtype))
+            parts.append(stream_gemm_right(B, omega(widths[2]), backend, dtype, frac))
         if widths[3]:
-            parts.append(stream_gemm_left_t(B, omega(widths[3]), backend, dtype))
+            parts.append(stream_gemm_left_t(B, omega(widths[3]), backend, dtype, frac))
 
         Y = xp.concatenate(parts, axis=1)      # (n, m)
         return self._orthonormalize(Y, backend)  # (n, m) orthonormal columns
