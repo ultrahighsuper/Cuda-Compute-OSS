@@ -380,6 +380,8 @@ def landmark_global_attention(
 
 
 def _normalized_weights(local_weight: float, global_weight: float) -> tuple[float, float]:
+    _require_finite_real("local_weight", local_weight)
+    _require_finite_real("global_weight", global_weight)
     if local_weight < 0 or global_weight < 0:
         raise ValueError("weights must be >= 0")
     total = local_weight + global_weight
