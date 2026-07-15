@@ -44,7 +44,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "decay). Ignored by other fills.")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--verify", action="store_true",
-                   help="report reconstruction error vs a float64 reference")
+                   help="check reconstruction error vs a float64 reference "
+                        "(exit 1 if above the dtype tolerance)")
     p.add_argument("--keep", action="store_true", help="keep on-disk files")
     p.add_argument("--quiet", action="store_true")
     return p
@@ -59,6 +60,8 @@ def main(argv=None) -> int:
             raise ValueError(f"--data-rank must be a positive integer, got {args.data_rank}")
         if args.rank_m is not None and args.rank_m < 1:
             raise ValueError(f"--rank-m must be a positive integer, got {args.rank_m}")
+        if args.rank_m is not None and args.rank_m > args.n:
+            raise ValueError(f"--rank-m must be <= --n ({args.n}), got {args.rank_m}")
         if args.spectral_alpha < 0:
             raise ValueError(f"--spectral-alpha must be >= 0, got {args.spectral_alpha}")
         cfg = Config(
@@ -94,6 +97,11 @@ def main(argv=None) -> int:
         err = info.get("verify", {}).get("max_rel_err")
         tail = f"  rel_err={err:.2e}" if err is not None else ""
         print(f"{info['mode']}  {info['seconds']:.4f}s{tail}")
+    # Fail only on an explicit mismatch. A skipped verify (large / disk-backed n)
+    # returns {"skipped": ...} with no "ok" key -- not a failure. Mirrors matmul.
+    v = info.get("verify")
+    if v and v.get("ok") is False:
+        return 1
     return 0
 
 

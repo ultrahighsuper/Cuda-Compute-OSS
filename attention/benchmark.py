@@ -77,6 +77,11 @@ def run_once(
     seed: int = 0,
     device: str = "auto",
 ) -> dict:
+    if mode not in {"fixed", "adaptive", "corrfft", "landmark", "topk", "both", "all"}:
+        raise ValueError("mode must be one of: fixed, adaptive, corrfft, landmark, topk, both, all")
+    if mode in {"adaptive", "both", "all"} and gate_strength < 0:
+        raise ValueError("gate_strength must be >= 0")
+
     torch = _torch()
     from .hybrid import (
         adaptive_hybrid_attention,
@@ -85,9 +90,6 @@ def run_once(
         landmark_hybrid_attention,
     )
     from .reference import exact_attention
-
-    if mode not in {"fixed", "adaptive", "corrfft", "landmark", "topk", "both", "all"}:
-        raise ValueError("mode must be one of: fixed, adaptive, corrfft, landmark, topk, both, all")
 
     spec = AttentionSpec(
         batch=batch,

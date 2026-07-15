@@ -1,8 +1,10 @@
 """Shared benchmark spec for the attention playground."""
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import asdict, dataclass
+from numbers import Real
 
 # Kept in sync with attention.data.torch_dtype's map and the benchmark CLI's
 # --dtype choices.
@@ -41,6 +43,11 @@ class AttentionSpec:
                 raise ValueError(f"{name} must be > 0")
         if self.window < 0:
             raise ValueError("window must be >= 0")
+        for name in ("local_weight", "global_weight", "freq_decay"):
+            value = getattr(self, name)
+            if (isinstance(value, bool) or not isinstance(value, Real)
+                    or not math.isfinite(value)):
+                raise ValueError(f"{name} must be a finite real number")
         if self.local_weight < 0 or self.global_weight < 0:
             raise ValueError("branch weights must be >= 0")
         if self.local_weight + self.global_weight <= 0:

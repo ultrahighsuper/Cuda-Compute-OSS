@@ -25,14 +25,27 @@ def _fill_random(mat: np.ndarray, seed: int, scale: float = 1.0) -> None:
 
 
 def _fill_iota(mat: np.ndarray, seed: int = 0) -> None:
-    """Cheap deterministic fill (value = (i+j+seed) mod 97) for fast benchmarking."""
+    """Cheap seeded fill for fast benchmarking:
+    value = (i + j + row_shift[i] + col_shift[j]) mod 97.
+
+    The base ``i + j`` keeps the deterministic iota band; ``row_shift`` and
+    ``col_shift`` are drawn from ``seed``. Previously ``seed`` entered only as a
+    single additive constant ``(i + j + seed) % 97``, so distinct seeds produced
+    the *same* matrix up to a global shift: a couple's A and B (seeds s, s+1) and
+    successive couples were trivial offsets of one another, and eval effectively
+    benchmarked ``A @ A`` on one repeated input (issue #104). Per-row/column
+    shifts make distinct seeds statistically independent while staying O(n) cheap
+    and deterministic per seed."""
     n = mat.shape[0]
+    rng = np.random.default_rng(seed)
+    row_shift = rng.integers(0, 97, size=n)
+    col_shift = rng.integers(0, 97, size=n)
     block = max(1, min(n, (256 * 1024**2) // (n * 8)))
-    cols = np.arange(n)
+    cols = np.arange(n) + col_shift
     for r0 in range(0, n, block):
         r1 = min(n, r0 + block)
-        rows = np.arange(r0, r1)[:, None]
-        mat[r0:r1, :] = ((rows + cols + seed) % 97).astype(mat.dtype, copy=False)
+        rows = (np.arange(r0, r1) + row_shift[r0:r1])[:, None]
+        mat[r0:r1, :] = ((rows + cols) % 97).astype(mat.dtype, copy=False)
     if isinstance(mat, np.memmap):
         mat.flush()
 

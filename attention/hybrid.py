@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+from numbers import Integral, Real
 
 
 def _torch():
@@ -13,6 +14,20 @@ def _torch():
             "uv sync --extra gpu"
         ) from exc
     return torch
+
+
+def _require_finite_real(name: str, value) -> None:
+    """Reject values that comparison-only range checks would let through."""
+    if (isinstance(value, bool) or not isinstance(value, Real)
+            or not math.isfinite(value)):
+        raise ValueError(f"{name} must be a finite real number")
+
+
+def _require_integer(name: str, value, *, minimum: int) -> None:
+    if (isinstance(value, bool) or not isinstance(value, Integral)
+            or value < minimum):
+        qualifier = "positive" if minimum == 1 else "non-negative"
+        raise ValueError(f"{name} must be a {qualifier} integer")
 
 
 def _position_mask(q0: int, q1: int, k0: int, k1: int, *, window: int, causal: bool, device):
@@ -33,11 +48,12 @@ def local_window_attention(q, k, v, *, window: int, causal: bool = False, block_
     avoiding materializing a full n x n score matrix.
     """
     torch = _torch()
-    if window < 0:
-        raise ValueError("window must be >= 0")
+    _require_integer("window", window, minimum=0)
+    if block_size is not None:
+        _require_integer("block_size", block_size, minimum=1)
 
     batch, heads, seq, dim = q.shape
-    block = block_size or min(max(64, window or 1), seq)
+    block = block_size if block_size is not None else min(max(64, window or 1), seq)
     out = torch.empty_like(v)
 
     for q0 in range(0, seq, block):
@@ -71,6 +87,7 @@ def spectral_global_mix(v, *, freq_decay: float = 1.0, causal: bool = False):
     below), so ``out[t]`` depends only on ``v[0..t]``.
     """
     torch = _torch()
+    _require_finite_real("freq_decay", freq_decay)
     if freq_decay < 0:
         raise ValueError("freq_decay must be >= 0")
 
@@ -125,6 +142,8 @@ def adaptive_spectral_global_mix(
     so ``out[t]`` depends only on ``q[0..t]`` and ``v[0..t]``.
     """
     torch = _torch()
+    _require_finite_real("freq_decay", freq_decay)
+    _require_finite_real("gate_strength", gate_strength)
     if freq_decay < 0:
         raise ValueError("freq_decay must be >= 0")
     if gate_strength < 0:
@@ -180,6 +199,8 @@ def correlation_spectral_global_mix(
     then applied to V as a circular convolution in frequency space.
     """
     torch = _torch()
+    _require_finite_real("temperature", temperature)
+    _require_finite_real("freq_decay", freq_decay)
     if temperature <= 0:
         raise ValueError("temperature must be > 0")
     if freq_decay < 0:
@@ -317,8 +338,7 @@ def landmark_global_attention(
 ):
     """Approximate global attention by attending to selected K/V landmarks."""
     torch = _torch()
-    if num_landmarks <= 0:
-        raise ValueError("num_landmarks must be > 0")
+    _require_integer("num_landmarks", num_landmarks, minimum=1)
     if policy not in {"pooled", "topk"}:
         raise ValueError("policy must be one of: pooled, topk")
     if policy == "topk" and causal:
@@ -367,6 +387,8 @@ def landmark_global_attention(
 
 
 def _normalized_weights(local_weight: float, global_weight: float) -> tuple[float, float]:
+    _require_finite_real("local_weight", local_weight)
+    _require_finite_real("global_weight", global_weight)
     if local_weight < 0 or global_weight < 0:
         raise ValueError("weights must be >= 0")
     total = local_weight + global_weight

@@ -5,6 +5,7 @@ Standalone: this package does not import from the sibling `matmul` package.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from numbers import Integral
 import numpy as np
 
 DTYPES = {
@@ -49,8 +50,23 @@ class Config:
     def __post_init__(self):
         if self.dtype not in DTYPES:
             raise ValueError(f"dtype must be one of {list(DTYPES)}, got {self.dtype!r}")
+        if (isinstance(self.device, bool) or not isinstance(self.device, Integral)
+                or self.device < 0):
+            raise ValueError("device must be a non-negative integer")
+        for name in ("transform_seed", "seed"):
+            value = getattr(self, name)
+            if (isinstance(value, bool) or not isinstance(value, Integral)
+                    or value < 0):
+                raise ValueError(f"{name} must be a non-negative integer")
         if not (0.0 < self.vram_fraction <= 0.95):
             raise ValueError("vram_fraction must be in (0, 0.95]")
+        if self.rank_m is not None and (
+            isinstance(self.rank_m, bool) or not isinstance(self.rank_m, Integral)
+        ):
+            # A fractional rank passes the range guard in multiply_subspace()
+            # but then fails deep in a shape/range operation. ``bool`` is an
+            # Integral subclass, yet rank True/False is never meaningful.
+            raise ValueError("rank_m must be an integer or None")
         if self.storage not in ("ram", "disk", "auto"):
             raise ValueError("storage must be ram|disk|auto")
 
