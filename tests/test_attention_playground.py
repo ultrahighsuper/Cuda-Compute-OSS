@@ -138,6 +138,17 @@ def test_attention_spec_rejects_invalid_branch_weights():
             raise AssertionError(f"AttentionSpec({kwargs!r}) should raise ValueError")
 
 
+def test_attention_spec_rejects_nonfinite_branch_knobs():
+    for name in ("local_weight", "global_weight", "freq_decay"):
+        for bad in (float("nan"), float("inf"), True, "1.0"):
+            try:
+                AttentionSpec(**{name: bad})
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"AttentionSpec({name}={bad!r}) should raise ValueError")
+
+
 def test_generate_qkv_uses_spec_shape():
     if _skip_if_no_torch():
         return
@@ -181,6 +192,43 @@ def test_adaptive_spectral_global_mix_preserves_shape_and_finiteness():
     out = adaptive_spectral_global_mix(q, v, freq_decay=0.5, gate_strength=0.2)
     assert tuple(out.shape) == tuple(v.shape)
     assert torch.isfinite(out).all()
+
+
+def test_spectral_mixers_reject_nonfinite_knobs():
+    if _skip_if_no_torch():
+        return
+    q, k, v = _sample(seq=8, dim=4)
+    for bad in (float("nan"), float("inf"), True, "1.0"):
+        for fn, kwargs in (
+            (spectral_global_mix, {"v": v, "freq_decay": bad}),
+            (adaptive_spectral_global_mix, {"q": q, "v": v, "gate_strength": bad}),
+            (correlation_spectral_global_mix, {
+                "q": q, "k": k, "v": v, "temperature": bad,
+            }),
+        ):
+            try:
+                fn(**kwargs)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"{fn.__name__} should reject {bad!r}")
+
+
+def test_adaptive_and_correlation_mixers_reject_nonfinite_freq_decay():
+    if _skip_if_no_torch():
+        return
+    q, k, v = _sample(seq=8, dim=4)
+    for fn, kwargs in (
+        (adaptive_spectral_global_mix, {"q": q, "v": v}),
+        (correlation_spectral_global_mix, {"q": q, "k": k, "v": v}),
+    ):
+        for bad in (float("nan"), float("inf"), True, "1.0"):
+            try:
+                fn(**kwargs, freq_decay=bad)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"{fn.__name__} should reject {bad!r}")
 
 
 def test_spectral_global_mix_causal_does_not_see_the_future():

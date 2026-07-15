@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+from numbers import Real
 
 
 def _torch():
@@ -13,6 +14,13 @@ def _torch():
             "uv sync --extra gpu"
         ) from exc
     return torch
+
+
+def _require_finite_real(name: str, value) -> None:
+    """Reject values that comparison-only range checks would let through."""
+    if (isinstance(value, bool) or not isinstance(value, Real)
+            or not math.isfinite(value)):
+        raise ValueError(f"{name} must be a finite real number")
 
 
 def _position_mask(q0: int, q1: int, k0: int, k1: int, *, window: int, causal: bool, device):
@@ -71,6 +79,7 @@ def spectral_global_mix(v, *, freq_decay: float = 1.0, causal: bool = False):
     below), so ``out[t]`` depends only on ``v[0..t]``.
     """
     torch = _torch()
+    _require_finite_real("freq_decay", freq_decay)
     if freq_decay < 0:
         raise ValueError("freq_decay must be >= 0")
 
@@ -125,6 +134,8 @@ def adaptive_spectral_global_mix(
     so ``out[t]`` depends only on ``q[0..t]`` and ``v[0..t]``.
     """
     torch = _torch()
+    _require_finite_real("freq_decay", freq_decay)
+    _require_finite_real("gate_strength", gate_strength)
     if freq_decay < 0:
         raise ValueError("freq_decay must be >= 0")
     if gate_strength < 0:
@@ -180,6 +191,8 @@ def correlation_spectral_global_mix(
     then applied to V as a circular convolution in frequency space.
     """
     torch = _torch()
+    _require_finite_real("temperature", temperature)
+    _require_finite_real("freq_decay", freq_decay)
     if temperature <= 0:
         raise ValueError("temperature must be > 0")
     if freq_decay < 0:
